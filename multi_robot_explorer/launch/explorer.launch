@@ -1,0 +1,5 @@
+<launch>
+    <node pkg="multi_robot_explorer" type="multi_robot_explorer_node" name="multi_robot_explorer_node" output="screen">
+        <param name="num_robots" value="4" /> <!-- robot sayısı değişirse buradan işlem yapılabilir (4 dışında deneme yapmadım) -->
+    </node>
+</launch>
