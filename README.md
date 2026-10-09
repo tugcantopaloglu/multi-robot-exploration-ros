@@ -12,15 +12,15 @@ The `multi_robot_explorer` node is the heart of the exploration logic:
 3. **Target Optimisation** – Because many frontier points can be very close, they are grouped with a *clustering* algorithm, and the centroid of each cluster becomes a candidate target.  
    *In testing, robots tended to get stuck without clustering, so it is enabled by default.*  
 4. **Intelligent Task Assignment** – Each idle robot is assigned the nearest frontier target that is not already claimed by another robot.  
-5. **Blacklist Mechanism** – A key feature. If a robot cannot reach an assigned target (e.g. the goal is behind a wall or the robot is trapped), that target is temporarily **black‑listed**.  
-   This prevents the node from repeatedly assigning an unreachable goal, avoiding error loops and reducing situations where robots spin in place or collide with walls.  
+5. **Blacklist Mechanism** – A key feature. If a robot cannot reach an assigned target (e.g. the goal is behind a wall or the robot is trapped), that target is **blacklisted for the lifetime of the node**.
+   Candidate centroids within 1 meter of a blacklisted target are skipped. Restarting the node clears this list; there is no timed expiry.
 6. **Task Monitoring** – Goals are sent via the ROS `actionlib` interface, allowing reliable tracking of whether the robot has reached the goal or encountered problems.
 
 ---
 
 ## Dependencies
 
-Install the following packages before running the project.
+Use Linux with ROS1 Noetic and catkin installed. Source `/opt/ros/noetic/setup.bash` before creating or building a workspace. Install the following packages before running the project.
 
 ### System packages (install with APT)
 
@@ -71,17 +71,17 @@ Install the following packages before running the project.
    catkin_make
    ```
 
-   If you encounter build errors, remove the `build` and `devel` folders (`rm -rf build devel`) and run `catkin_make` again.
+   Start from a fresh workspace if its cache refers to another machine or ROS installation.
 
-5. **Set environment variables** – add the following lines to `.bashrc`:
+5. **Set the environment in each terminal**:
 
    ```bash
-   echo "source /opt/ros/noetic/setup.bash" >> ~/.bashrc
-   echo "source ~/robotlar_ws/devel/setup.bash" >> ~/.bashrc
-   echo "export TURTLEBOT3_MODEL=burger" >> ~/.bashrc
+   source /opt/ros/noetic/setup.bash
+   source ~/robotlar_ws/devel/setup.bash
+   export TURTLEBOT3_MODEL=burger
    ```
 
-   **Close and reopen** all terminals or run `source ~/.bashrc`.
+   Source the ROS installation before creating or building the workspace as well.
 
 ---
 
@@ -173,9 +173,9 @@ After letting the system explore for a while, the map reaches its final state:
 
 After launching the final command:
 
-* **Terminal 6** – Logs like `New goal assigned to Robot X...` appear.  
+* **Terminal 6** - Goal-assignment messages identify the robot and target coordinates.
 * **RViz** – Robots automatically draw green paths toward unexplored areas.  
-* If a robot cannot reach its goal, you will see `could not reach goal` followed by `goal added to blacklist`. The robot immediately switches to another target instead of getting stuck.  
+* If a robot cannot reach its goal, the node logs the terminal action state and adds the target to the blacklist. The robot becomes eligible for another target on the next assignment cycle.
 
 Exploration ends automatically when no new frontier points remain and all robots have completed their tasks.
 
@@ -187,3 +187,18 @@ To change the number of robots, edit the `num_robots` parameter in
 ```xml
 <param name="num_robots" value="4" />
 ```
+
+## Validation and operational limits
+
+The launch parameter `num_robots` must be positive. Robot names are generated as `tb3_0`, `tb3_1`, and so on; each needs a matching `/<name>/move_base` action server and `<name>/base_footprint` transform into `map`. Goal assignment waits for disconnected action servers. Action callbacks run on the exploration loop's ROS callback queue so they cannot concurrently modify assignment and blacklist state.
+
+The node rejects empty or inconsistent occupancy grids, nonpositive resolution and nonfinite map origins. It waits for known free space instead of declaring an all-unknown map complete. Frontier detection considers interior free cells with an unknown neighbor. Clustering uses a 1-meter connection threshold and selects the arithmetic centroid; that centroid can fall outside free space and may be rejected by navigation. Map origins are assumed to have no rotation. Blacklisting is permanent until restart, so blocked frontiers can remain while robots are idle; shutdown occurs only when a map has known free space, no raw frontiers remain and all robots are idle.
+
+The standalone regression test checks empty, undersized, malformed and normal occupancy grids, including diagonal unknown neighbors and obstacle exclusion:
+
+```bash
+g++ -std=c++11 -Wall -Wextra -Werror multi_robot_explorer/test/frontier_cells_test.cpp -o /tmp/frontier_cells_test
+/tmp/frontier_cells_test
+```
+
+In a built catkin workspace, run `ctest --test-dir build -R frontier_cells_test --output-on-failure`. These tests do not validate ROS transport, actionlib scheduling, TF, map merging, Gazebo navigation or real robots. Full acceptance needs ROS1 Noetic and the external multi-robot launch packages listed above. The screenshot sequence records the original assignment run.

@@ -13,6 +13,9 @@
 #include <string>
 #include <cmath>
 #include <algorithm>
+#include <limits>
+#include <memory>
+#include <stdexcept>
 
 typedef actionlib::SimpleActionClient<move_base_msgs::MoveBaseAction> MoveBaseClient;
 
@@ -34,7 +37,7 @@ private:
     ros::Subscriber map_subscriber_;
 
     int num_robots_;
-    std::vector<MoveBaseClient *> action_clients_;
+    std::vector<std::unique_ptr<MoveBaseClient>> action_clients_;
     std::vector<bool> robot_is_busy_;
     std::vector<std::string> robot_names_;
     std::vector<geometry_msgs::Point> assigned_frontiers_;

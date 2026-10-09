@@ -2,10 +2,10 @@
 <package format="2">
   <name>multi_robot_explorer</name>
   <version>0.0.1</version>
-  <description>Multi robot kesif paketi - Final Odevi.</description>
+  <description>Frontier-based multi-robot exploration for ROS1.</description>
 
   <maintainer email="topaloglutugcan@gmail.com">Tugcan</maintainer>
-  <license>No</license>
+  <license>MIT</license>
 
   <buildtool_depend>catkin</buildtool_depend>
 

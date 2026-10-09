@@ -1,8 +1,11 @@
 #include "multi_robot_explorer/multi_robot_explorer.h"
+#include "multi_robot_explorer/frontier_cells.h"
 
 MultiRobotExplorer::MultiRobotExplorer(ros::NodeHandle &nh) : nh_(nh), tf_listener_(tf_buffer_)
 {
     nh_.param("num_robots", num_robots_, 4);
+    if (num_robots_ <= 0)
+        throw std::invalid_argument("num_robots must be positive.");
 
     robot_names_.resize(num_robots_);
     for (int i = 0; i < num_robots_; ++i)
@@ -19,22 +22,20 @@ MultiRobotExplorer::MultiRobotExplorer(ros::NodeHandle &nh) : nh_(nh), tf_listen
     for (int i = 0; i < num_robots_; ++i)
     {
         std::string action_server_name = "/" + robot_names_[i] + "/move_base";
-        action_clients_[i] = new MoveBaseClient(action_server_name, true);
-
-        ROS_INFO("Robot %d icin action sunucusu bekleniyor: %s", i, action_server_name.c_str());
-        if (!action_clients_[i]->waitForServer(ros::Duration(5.0)))
-        {
-            ROS_ERROR("Robot %d icin action sunucusu bulunamadi!", i);
-        }
-        else
-        {
-            ROS_INFO("Robot %d icin action sunucusu bulundu.", i);
-        }
+        action_clients_[i].reset(new MoveBaseClient(action_server_name, false));
+        ROS_INFO("Robot %d action client created: %s", i, action_server_name.c_str());
     }
 }
 
 void MultiRobotExplorer::mapCallback(const nav_msgs::OccupancyGrid::ConstPtr &msg)
 {
+    if (!frontier_cells::validGrid(msg->info.width, msg->info.height, msg->data.size()) ||
+        !std::isfinite(msg->info.resolution) || msg->info.resolution <= 0.0 ||
+        !std::isfinite(msg->info.origin.position.x) || !std::isfinite(msg->info.origin.position.y))
+    {
+        ROS_WARN_THROTTLE(5, "Ignoring an invalid occupancy grid.");
+        return;
+    }
     current_map_ = *msg;
     map_received_ = true;
     ROS_INFO_ONCE("Ilk harita alindi. Kesif basliyor...");
@@ -67,48 +68,16 @@ std::vector<geometry_msgs::Point> MultiRobotExplorer::findFrontiers()
     if (!map_received_)
         return frontiers;
 
-    const auto &map_data = current_map_.data;
     const auto &map_info = current_map_.info;
-    const unsigned int width = map_info.width;
-    const unsigned int height = map_info.height;
-
-    // haritadaki her hücreyi dolaş
-    for (unsigned int y = 1; y < height - 1; ++y)
+    for (const auto &cell : frontier_cells::find(current_map_.data, map_info.width, map_info.height))
     {
-        for (unsigned int x = 1; x < width - 1; ++x)
-        {
-            unsigned int i = y * width + x;
-
-            if (map_data[i] != 0)
-                continue;
-
-            bool has_unknown_neighbor = false;
-            for (int dy = -1; dy <= 1; ++dy)
-            {
-                for (int dx = -1; dx <= 1; ++dx)
-                {
-                    if (dx == 0 && dy == 0)
-                        continue;
-                    unsigned int neighbor_i = (y + dy) * width + (x + dx);
-                    if (map_data[neighbor_i] == -1)
-                    {
-                        has_unknown_neighbor = true;
-                        break;
-                    }
-                }
-                if (has_unknown_neighbor)
-                    break;
-            }
-
-            if (has_unknown_neighbor)
-            {
-                geometry_msgs::Point p;
-                p.x = map_info.origin.position.x + (x + 0.5) * map_info.resolution;
-                p.y = map_info.origin.position.y + (y + 0.5) * map_info.resolution;
-                p.z = 0;
-                frontiers.push_back(p);
-            }
-        }
+        const std::size_t x = cell % map_info.width;
+        const std::size_t y = cell / map_info.width;
+        geometry_msgs::Point p;
+        p.x = map_info.origin.position.x + (x + 0.5) * map_info.resolution;
+        p.y = map_info.origin.position.y + (y + 0.5) * map_info.resolution;
+        p.z = 0;
+        frontiers.push_back(p);
     }
     return frontiers;
 }
@@ -189,6 +158,11 @@ void MultiRobotExplorer::assignGoals()
         return;
     }
 
+    if (!frontier_cells::hasFreeCell(current_map_.data))
+    {
+        ROS_INFO_THROTTLE(5, "The map has no known free cells; waiting for mapping data.");
+        return;
+    }
     auto all_frontiers = findFrontiers();
     if (all_frontiers.empty())
     {
@@ -211,6 +185,11 @@ void MultiRobotExplorer::assignGoals()
     {
         if (!robot_is_busy_[i])
         {
+            if (!action_clients_[i]->isServerConnected())
+            {
+                ROS_WARN_THROTTLE(5, "Robot %d move_base server is not connected; waiting.", i);
+                continue;
+            }
             geometry_msgs::Point robot_pos = getRobotPosition(i);
             if (!std::isfinite(robot_pos.x))
                 continue;
@@ -269,10 +248,9 @@ void MultiRobotExplorer::assignGoals()
                 goal.target_pose.pose.position = best_frontier;
                 goal.target_pose.pose.orientation.w = 1.0;
 
-                action_clients_[i]->sendGoal(goal, boost::bind(&MultiRobotExplorer::goalDoneCallback, this, _1, _2, i));
-
                 robot_is_busy_[i] = true;
                 assigned_frontiers_[i] = best_frontier;
+                action_clients_[i]->sendGoal(goal, boost::bind(&MultiRobotExplorer::goalDoneCallback, this, _1, _2, i));
                 ROS_INFO("Robot %d icin yeni hedef atandi: [x: %.2f, y: %.2f]", i, best_frontier.x, best_frontier.y);
             }
         }
@@ -295,8 +273,16 @@ int main(int argc, char **argv)
     ros::init(argc, argv, "multi_robot_explorer_node");
     ros::NodeHandle nh("~");
 
-    MultiRobotExplorer explorer(nh);
-    explorer.explore();
+    try
+    {
+        MultiRobotExplorer explorer(nh);
+        explorer.explore();
+    }
+    catch (const std::exception &ex)
+    {
+        ROS_FATAL("Explorer initialization failed: %s", ex.what());
+        return 1;
+    }
 
     return 0;
 }
